@@ -1,4 +1,4 @@
-import express from 'express';
+	mport express from 'express';
 
 const app = express();
 app.use(express.json());
@@ -53,7 +53,7 @@ app.post('/v1/chat', checkMasterKey, async (req, res) => {
   }
 });
 
-// Endpoint do Live Code Canvas (Fase 3 - Item 1: Auto-Sync Bidirecional Refinado)
+// Endpoint do Live Code Canvas (Fase 3 - Item 1 & 2: Auto-Sync + Refinamento Cirúrgico)
 app.get('/canvas', (req, res) => {
   const htmlCanvas = `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -74,19 +74,21 @@ app.get('/canvas', (req, res) => {
 </head>
 <body>
   <div class="pane">
-    <header>Editor de Código (Auto-Sync)</header>
+    <header>Editor de Código (Auto-Sync & Refinamento)</header>
     <textarea id="codeEditor" spellcheck="false" placeholder="Escreva o seu HTML/JS aqui..."><!DOCTYPE html>
 <html>
 <head>
-  <style>
+  <style id="custom-style">
     body { background: #0f172a; color: #38bdf8; font-family: sans-serif; text-align: center; padding-top: 35vh; margin: 0; }
     h1 { font-size: 1.8rem; margin-bottom: 8px; }
     p { color: #94a3b8; font-size: 0.95rem; }
   </style>
 </head>
 <body>
-  <h1>RADAM NOX Live Canvas</h1>
-  <p>Edite o código à esquerda para sincronizar em tempo real.</p>
+  <div id="app-root">
+    <h1>RADAM NOX Live Canvas</h1>
+    <p>Sincronização em tempo real e injeção cirúrgica ativas.</p>
+  </div>
 </body>
 </html></textarea>
   </div>
@@ -99,27 +101,44 @@ app.get('/canvas', (req, res) => {
     const preview = document.getElementById('previewFrame');
     let timeout = null;
 
-    // Carrega código salvo localmente se existir
     const savedCode = localStorage.getItem('radam_canvas_code');
     if (savedCode) { editor.value = savedCode; }
 
-    function updatePreview() {
+    // Injeta script auxiliar dentro do iframe para permitir patches parciais
+    function updateFullPreview() {
       const code = editor.value;
       localStorage.setItem('radam_canvas_code', code);
       
       const doc = preview.contentDocument || preview.contentWindow.document;
       doc.open();
-      doc.write(code);
+      doc.write(code + \`<script>
+        window.addEventListener('message', (event) => {
+          if (event.data && event.data.type === 'patch') {
+            const el = document.querySelector(event.data.target);
+            if (el) { el.innerHTML = event.data.content; }
+          }
+        });
+      </\script>\`);
       doc.close();
     }
 
-    // Debounce de 250ms para sincronização fluida no mobile
+    // Função exposta para aplicação de alteração cirúrgica sem re-render completo
+    window.applyPatch = function(targetSelector, newContent) {
+      if (preview.contentWindow) {
+        preview.contentWindow.postMessage({
+          type: 'patch',
+          target: targetSelector,
+          content: newContent
+        }, '*');
+      }
+    };
+
     editor.addEventListener('input', () => {
       clearTimeout(timeout);
-      timeout = setTimeout(updatePreview, 250);
+      timeout = setTimeout(updateFullPreview, 250);
     });
 
-    window.onload = updatePreview;
+    window.onload = updateFullPreview;
   </script>
 </body>
 </html>`;
