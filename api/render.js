@@ -7,6 +7,15 @@ const pool = new Pool({
 
 module.exports = async (req, res) => {
   try {
+    // Permite checar se o evento de geração foi concluído caso seja enviado via query ou body
+    const eventStatus = req.query.event || req.body?.status;
+    if (eventStatus && eventStatus !== 'generation.complete' && eventStatus !== 'complete') {
+      return res.status(202).json({ 
+        status: 'pending', 
+        message: 'Deploy em espera: aguardando evento generation.complete.' 
+      });
+    }
+
     const result = await pool.query(
       'SELECT name, code, version FROM projects ORDER BY updated_at DESC LIMIT 1'
     );
@@ -21,6 +30,7 @@ module.exports = async (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('X-Radam-Version', version);
     res.setHeader('X-Radam-Project', name);
+    res.setHeader('X-Radam-Deploy-Event', 'generation.complete');
 
     if (code && code.trim().toLowerCase().startsWith('<!doctype')) {
       return res.status(200).send(code);
@@ -34,7 +44,7 @@ module.exports = async (req, res) => {
   <style>body { background: #0f172a; color: #38bdf8; font-family: sans-serif; text-align: center; padding-top: 20vh; }</style>
 </head>
 <body>
-  <h1>${name || 'RADAM NOX PaaS'}</h1>
+  <h1>${name || 'RADAM NOX PaaS - Event-Driven Deploy'}</h1>
   <div>${code || ''}</div>
 </body>
 </html>`;
