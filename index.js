@@ -1,62 +1,57 @@
-const express = require('express');
-const cors = require('cors');
+import express from 'express';
 
 const app = express();
+app.use(express.json());
 
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+// Validação da Master Key na Ponte
+const checkMasterKey = (req, res, next) => {
+  const masterKey = req.headers['x-master-key'];
+  const VALID_KEY = process.env.RADAMN_MASTER_KEY || 'RADAMN_MASTER_KEY_2026';
 
-const MASTER_KEY = process.env.RADAMN_MASTER_KEY || "RADAMN_MASTER_KEY_2026";
-
-const authenticateMasterKey = (req, res, next) => {
-    const authHeader = req.headers['authorization'] || req.headers['x-master-key'];
-    
-    if (!authHeader || authHeader.replace('Bearer ', '') !== MASTER_KEY) {
-        return res.status(401).json({ 
-            success: false, 
-            error: "Acesso Negado: Master Key inválida ou ausente." 
-        });
-    }
-    next();
+  if (!masterKey || masterKey !== VALID_KEY) {
+    return res.status(401).json({ error: 'Acesso não autorizado: Master Key inválida ou ausente.' });
+  }
+  next();
 };
 
-app.post('/api/v1/paas/ingress', authenticateMasterKey, (req, res) => {
-    const startTime = Date.now();
-    
-    try {
-        const { userId, projectId, mode, code, prompt } = req.body;
-
-        const normalizedPayload = {
-            userId: userId || "anonymous-nox",
-            projectId: projectId || `proj_${Date.now()}`,
-            mode: mode || "generate",
-            code: code || "",
-            prompt: prompt || "",
-            timestamp: new Date().toISOString()
-        };
-
-        if (!normalizedPayload.prompt && mode !== "chat") {
-            return res.status(400).json({ success: false, error: "Prompt não fornecido." });
-        }
-
-        return res.status(200).json({
-            status: "PAAS_INGRESS_READY",
-            latencyMs: Date.now() - startTime,
-            payload: normalizedPayload,
-            nextAction: "ROUTE_TO_ENGINE_AND_STORAGE"
-        });
-
-    } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
-    }
+// Endpoint de Saúde
+app.get('/health', checkMasterKey, (req, res) => {
+  return res.status(200).json({
+    status: 'ONLINE',
+    system: 'Radam Nox PaaS Bridge'
+  });
 });
 
-app.get('/health', (req, res) => {
-    res.status(200).json({ status: "ONLINE", system: "Radam Nox PaaS Bridge" });
+// PONTO DE CONEXÃO DIRETA: Roteamento para o Gateway (Radamn)
+app.post('/v1/chat', checkMasterKey, async (req, res) => {
+  const GATEWAY_URL = process.env.RADAMN_GATEWAY_URL || 'https://radamn.vercel.app/api/generate';
+  const MASTER_KEY = process.env.RADAMN_MASTER_KEY || 'RADAMN_MASTER_KEY_2026';
+
+  try {
+    const { prompt, message, messages } = req.body;
+    const payloadMessage = prompt || message || (messages && messages[messages.length - 1]?.content);
+
+    const response = await fetch(GATEWAY_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-master-key': MASTER_KEY
+      },
+      body: JSON.stringify({
+        message: payloadMessage,
+        messages: messages || [{ role: 'user', content: payloadMessage }]
+      })
+    });
+
+    const data = await response.json();
+    return res.status(response.status).json(data);
+
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Erro na Ponte ao conectar com o Gateway',
+      details: error.message
+    });
+  }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Ponte do PaaS ativa na porta ${PORT}`));
-
-module.exports = app;
-
+export default app;
