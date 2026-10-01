@@ -19,7 +19,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Handler genérico para aceitar requisições na raiz e em /generate
+// Handler central para salvar/atualizar projetos no Supabase
 const handleGenerate = async (req, res) => {
   try {
     const { projectId, projectName, newCode } = req.body;
@@ -27,8 +27,6 @@ const handleGenerate = async (req, res) => {
     if (!newCode) {
       return res.status(400).json({ error: 'O parâmetro newCode é obrigatório.' });
     }
-
-    let resultStatus = {};
 
     const generatedId = projectId || 'proj_' + Math.random().toString(36).substring(2, 9);
     const name = projectName || `App ${generatedId}`;
@@ -45,11 +43,10 @@ const handleGenerate = async (req, res) => {
     `;
 
     const dbResult = await pool.query(queryText, [generatedId, name, newCode]);
-    resultStatus = dbResult.rows[0];
 
     return res.status(200).json({
       message: 'Código processado e salvo com sucesso no banco!',
-      project: resultStatus
+      project: dbResult.rows[0]
     });
 
   } catch (err) {
@@ -58,9 +55,7 @@ const handleGenerate = async (req, res) => {
   }
 };
 
-app.post('/', handleGenerate);
-app.post('/generate', handleGenerate);
-app.post('/api/generate', handleGenerate);
+app.all('*', handleGenerate);
 
 module.exports = app;
 
