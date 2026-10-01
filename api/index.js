@@ -1,28 +1,24 @@
-const express = require('express');
 const { Pool } = require('pg');
 
-const app = express();
-app.use(express.json());
-
-// Conexão com o banco de dados PostgreSQL (Supabase)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Middleware de Autenticação (Handshake)
-app.use((req, res, next) => {
+module.exports = async (req, res) => {
+  // Trata métodos diferentes de POST
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Método não permitido. Use POST.' });
+  }
+
+  // Validação do Handshake (Master Key)
   const masterKey = req.headers['x-master-key'];
   if (!masterKey || masterKey !== process.env.RADAMN_MASTER_KEY) {
     return res.status(401).json({ error: 'Acesso não autorizado.' });
   }
-  next();
-});
 
-// Handler central para salvar/atualizar projetos no Supabase
-const handleGenerate = async (req, res) => {
   try {
-    const { projectId, projectName, newCode } = req.body;
+    const { projectId, projectName, newCode } = req.body || {};
 
     if (!newCode) {
       return res.status(400).json({ error: 'O parâmetro newCode é obrigatório.' });
@@ -50,16 +46,7 @@ const handleGenerate = async (req, res) => {
     });
 
   } catch (err) {
-    console.error('Erro na rota generate:', err);
-    return res.status(500).json({ error: 'Erro interno no servidor.', details: err.message });
+    console.error('Erro na função serverless:', err);
+    return res.status(500).json({ error: 'Erro de conexão ou execução.', details: err.message });
   }
 };
-
-app.all('*', handleGenerate);
-
-module.exports = app;
-
-if (require.main === module) {
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => console.log(`RADAM NOX PaaS rodando na porta ${PORT}`));
-}
