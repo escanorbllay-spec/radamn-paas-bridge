@@ -7,7 +7,6 @@ const pool = new Pool({
 
 module.exports = async (req, res) => {
   try {
-    // Busca sempre o projeto mais recente da tabela de forma segura
     const result = await pool.query(
       'SELECT name, code, version FROM projects ORDER BY updated_at DESC LIMIT 1'
     );
@@ -23,28 +22,26 @@ module.exports = async (req, res) => {
     res.setHeader('X-Radam-Version', version);
     res.setHeader('X-Radam-Project', name);
 
-    if (code.trim().toLowerCase().startsWith('<!doctype')) {
+    if (code && code.trim().toLowerCase().startsWith('<!doctype')) {
       return res.status(200).send(code);
     }
 
-    const htmlWrapper = `<!DOCTYPE html>
+    const html = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${name} - RADAM NOX PaaS</title>
-  <style>
-    body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #38bdf8; }
-  </style>
+  <title>${name || 'RADAM NOX'}</title>
+  <style>body { background: #0f172a; color: #38bdf8; font-family: sans-serif; text-align: center; padding-top: 20vh; }</style>
 </head>
 <body>
-  <div id="root">${code}</div>
+  <h1>${name || 'RADAM NOX PaaS'}</h1>
+  <div>${code || ''}</div>
 </body>
 </html>`;
 
-    return res.status(200).send(htmlWrapper);
+    return res.status(200).send(html);
   } catch (err) {
-    return.res.status(500).send('Erro interno no servidor: ' + err.message);
+    return res.status(500).send('Erro interno: ' + err.message);
   }
 };
 
