@@ -1,4 +1,3 @@
-cat << 'EOF' > api/index.js
 const express = require('express');
 const { Pool } = require('pg');
 
@@ -20,8 +19,8 @@ app.use((req, res, next) => {
   next();
 });
 
-// Rota Principal: Processamento de IA + Auto-Save / Persistence
-app.post('/api/generate', async (req, res) => {
+// Handler genérico para aceitar requisições na raiz e em /generate
+const handleGenerate = async (req, res) => {
   try {
     const { projectId, projectName, newCode } = req.body;
 
@@ -31,11 +30,9 @@ app.post('/api/generate', async (req, res) => {
 
     let resultStatus = {};
 
-    // Lógica de Persistência / Auto-Provisionamento
     const generatedId = projectId || 'proj_' + Math.random().toString(36).substring(2, 9);
     const name = projectName || `App ${generatedId}`;
 
-    // Upsert na tabela 'projects'
     const queryText = `
       INSERT INTO projects (id, name, code, version, updated_at)
       VALUES ($1, $2, $3, 1, NOW())
@@ -56,10 +53,14 @@ app.post('/api/generate', async (req, res) => {
     });
 
   } catch (err) {
-    console.error('Erro na rota /api/generate:', err);
+    console.error('Erro na rota generate:', err);
     return res.status(500).json({ error: 'Erro interno no servidor.', details: err.message });
   }
-});
+};
+
+app.post('/', handleGenerate);
+app.post('/generate', handleGenerate);
+app.post('/api/generate', handleGenerate);
 
 module.exports = app;
 
@@ -67,4 +68,3 @@ if (require.main === module) {
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => console.log(`RADAM NOX PaaS rodando na porta ${PORT}`));
 }
-
