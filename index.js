@@ -1,4 +1,4 @@
-	mport express from 'express';
+import express from 'express';
 
 const app = express();
 app.use(express.json());
@@ -53,7 +53,7 @@ app.post('/v1/chat', checkMasterKey, async (req, res) => {
   }
 });
 
-// Endpoint do Live Code Canvas (Fase 3 - Item 1 & 2: Auto-Sync + Refinamento Cirúrgico)
+// Endpoint do Live Code Canvas (Fase 3 - Completa: Auto-Sync, Patch e Recuperação de Estado)
 app.get('/canvas', (req, res) => {
   const htmlCanvas = `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -67,14 +67,18 @@ app.get('/canvas', (req, res) => {
     @media (min-width: 768px) { body { flex-direction: row; } }
     .pane { flex: 1; display: flex; flex-direction: column; border-bottom: 1px solid #334155; }
     @media (min-width: 768px) { .pane { border-bottom: none; border-right: 1px solid #334155; } }
-    .pane header { background: #1e293b; padding: 10px 15px; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #38bdf8; border-bottom: 1px solid #334155; }
+    .pane header { background: #1e293b; padding: 10px 15px; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #38bdf8; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }
+    .status { font-size: 11px; color: #4ade80; text-transform: none; font-weight: normal; }
     textarea { flex: 1; background: #090d16; color: #38bdf8; border: none; padding: 15px; font-family: monospace; font-size: 13px; resize: none; outline: none; line-height: 1.5; }
     iframe { flex: 1; border: none; background: #ffffff; }
   </style>
 </head>
 <body>
   <div class="pane">
-    <header>Editor de Código (Auto-Sync & Refinamento)</header>
+    <header>
+      <span>Editor de Código</span>
+      <span id="syncStatus" class="status">● Sincronizado</span>
+    </header>
     <textarea id="codeEditor" spellcheck="false" placeholder="Escreva o seu HTML/JS aqui..."><!DOCTYPE html>
 <html>
 <head>
@@ -87,7 +91,7 @@ app.get('/canvas', (req, res) => {
 <body>
   <div id="app-root">
     <h1>RADAM NOX Live Canvas</h1>
-    <p>Sincronização em tempo real e injeção cirúrgica ativas.</p>
+    <p>Recuperação de estado e sincronização contínua ativas.</p>
   </div>
 </body>
 </html></textarea>
@@ -99,16 +103,19 @@ app.get('/canvas', (req, res) => {
   <script>
     const editor = document.getElementById('codeEditor');
     const preview = document.getElementById('previewFrame');
+    const syncStatus = document.getElementById('syncStatus');
     let timeout = null;
 
+    // Recuperação Autônoma de Estado
     const savedCode = localStorage.getItem('radam_canvas_code');
     if (savedCode) { editor.value = savedCode; }
 
-    // Injeta script auxiliar dentro do iframe para permitir patches parciais
     function updateFullPreview() {
       const code = editor.value;
       localStorage.setItem('radam_canvas_code', code);
-      
+      syncStatus.innerText = '● Sincronizado (Local)';
+      syncStatus.style.color = '#4ade80';
+
       const doc = preview.contentDocument || preview.contentWindow.document;
       doc.open();
       doc.write(code + \`<script>
@@ -122,7 +129,6 @@ app.get('/canvas', (req, res) => {
       doc.close();
     }
 
-    // Função exposta para aplicação de alteração cirúrgica sem re-render completo
     window.applyPatch = function(targetSelector, newContent) {
       if (preview.contentWindow) {
         preview.contentWindow.postMessage({
@@ -134,6 +140,8 @@ app.get('/canvas', (req, res) => {
     };
 
     editor.addEventListener('input', () => {
+      syncStatus.innerText = '○ Salvando...';
+      syncStatus.style.color = '#facc15';
       clearTimeout(timeout);
       timeout = setTimeout(updateFullPreview, 250);
     });
