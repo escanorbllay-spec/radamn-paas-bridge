@@ -3,6 +3,17 @@ import express from 'express';
 const app = express();
 app.use(express.json());
 
+// CONFIGURAÇÃO DE CORS PARA A INTERFACE SPA
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-master-key, x-radam-intent');
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
+
 // Telemetria e Métricas em Memória
 const metrics = {
   startTime: new Date().toISOString(),
@@ -14,6 +25,9 @@ const metrics = {
   activeQueueCount: 0,
   recentLogs: []
 };
+
+// Armazenamento em Memória para Snapshots / Projetos (Simulação/Bridge Supabase)
+const projectStore = new Map();
 
 // Event Bus & Gerenciamento de Filas Assíncronas (Camada 0)
 const requestQueue = [];
@@ -97,6 +111,54 @@ app.get('/health', checkMasterKey, (req, res) => {
   });
 });
 
+// FASE 1: Gestão Autônoma de Projetos & Snapshots (Radam Nox Interface SPA)
+app.post('/v1/projects', checkMasterKey, (req, res) => {
+  const { projectId, projectName, newCode, snapshot } = req.body;
+  const id = projectId || `proj_${Date.now()}`;
+
+  const existingProject = projectStore.get(id);
+
+  // Diff-Check Inteligente
+  if (existingProject && existingProject.code === newCode) {
+    return res.status(200).json({
+      projectId: id,
+      version: existingProject.version,
+      unchanged: true,
+      message: 'Código idêntico ao armazenado. Gravação ignorada.'
+    });
+  }
+
+  const newVersion = existingProject ? existingProject.version + 1 : 1;
+  const updatedData = {
+    projectId: id,
+    projectName: projectName || existingProject?.projectName || 'Projeto Sem Nome',
+    code: newCode || existingProject?.code || '',
+    version: newVersion,
+    snapshot: snapshot || existingProject?.snapshot || null,
+    updatedAt: new Date().toISOString()
+  };
+
+  projectStore.set(id, updatedData);
+  logEvent('PROJECT_SAVE', { projectId: id, version: newVersion });
+
+  return res.status(200).json({
+    projectId: id,
+    projectName: updatedData.projectName,
+    version: newVersion,
+    unchanged: false,
+    updatedAt: updatedData.updatedAt
+  });
+});
+
+// FASE 1: Snapshot Remoto de Estado (Resgate de Checkpoints)
+app.get('/v1/projects/:id', checkMasterKey, (req, res) => {
+  const project = projectStore.get(req.params.id);
+  if (!project) {
+    return res.status(404).json({ error: 'Projeto não encontrado.' });
+  }
+  return res.status(200).json(project);
+});
+
 // Painel Visual de Observabilidade
 app.get('/dashboard', (req, res) => {
   const htmlDashboard = `<!DOCTYPE html>
@@ -154,7 +216,7 @@ app.get('/dashboard', (req, res) => {
         const container = document.getElementById('logsContainer');
         container.innerHTML = data.recentLogs.map(l => \`
           <div class="log-item">
-            <span class="tag tag-\${l.type.includes('SUCCESS') ? 'SUCCESS' : l.type.includes('FAILOVER') ? 'FAILOVER' : 'FAILED'}">\${l.type}</span>
+            <span class="tag tag-\${l.type.includes('SUCCESS') || l.type.includes('SAVE') ? 'SUCCESS' : l.type.includes('FAILOVER') ? 'FAILOVER' : 'FAILED'}">\${l.type}</span>
             <span style="color: #64748b;">[\${new Date(l.timestamp).toLocaleTimeString()}]</span>
             <span style="color: #cbd5e1;">\${JSON.stringify(l.details)}</span>
           </div>
@@ -172,14 +234,13 @@ app.get('/dashboard', (req, res) => {
   return res.status(200).send(htmlDashboard);
 });
 
-// Roteamento Inteligente com Failover & Streaming SSE (Camada 0)
+// Roteamento Inteligente com Failover & Streaming SSE
 app.post('/v1/chat', checkMasterKey, async (req, res) => {
   metrics.totalRequests++;
 
   return enqueueRequest(async () => {
     const PRIMARY_GATEWAY = process.env.RADAMN_GATEWAY_URL || 'https://radamn.vercel.app/api/generate';
     const FALLBACK_GATEWAY = process.env.RADAMN_FALLBACK_URL || 'https://radamn-backup.vercel.app/api/generate';
-    const RENDER_CHAT_URL = process.env.RADAMN_RENDER_URL || 'https://radamn.onrender.com/api/chat';
     const MASTER_KEY = process.env.RADAMN_MASTER_KEY || 'RADAMN_MASTER_KEY_2026';
 
     const { prompt, message, messages, stream } = req.body;
@@ -199,7 +260,6 @@ app.post('/v1/chat', checkMasterKey, async (req, res) => {
       'x-radam-intent': promptClassification.category
     };
 
-    // SUPORTE A STREAMING DIRETO VIA SSE
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
@@ -248,7 +308,6 @@ app.post('/v1/chat', checkMasterKey, async (req, res) => {
       }
     }
 
-    // REQUISIÇÃO PADRÃO (SEM STREAM)
     try {
       const response = await fetch(PRIMARY_GATEWAY, { method: 'POST', headers, body: payload });
       if (!response.ok) throw new Error(`Primary status: ${response.status}`);
