@@ -1,7 +1,24 @@
-import express from 'express';
+	mport express from 'express';
 
 const app = express();
 app.use(express.json());
+
+// Telemetria e Métricas em Memória
+const metrics = {
+  startTime: new Date().toISOString(),
+  totalRequests: 0,
+  successfulRequests: 0,
+  failedRequests: 0,
+  failoverTriggers: 0,
+  selfHealingCount: 0,
+  recentLogs: []
+};
+
+function logEvent(type, details) {
+  const entry = { timestamp: new Date().toISOString(), type, details };
+  metrics.recentLogs.unshift(entry);
+  if (metrics.recentLogs.length > 20) metrics.recentLogs.pop();
+}
 
 // Validação da Master Key na Ponte
 const checkMasterKey = (req, res, next) => {
@@ -29,16 +46,27 @@ function classifyPrompt(promptText = '') {
   return { category: 'FULL_APP', priority: 'MEDIUM', strategy: 'GENERATIVE' };
 }
 
-// Endpoint de Saúde
+// ENDPOINT DE TELEMETRIA E SAÚDE (Fase 5 - Item 1)
 app.get('/health', checkMasterKey, (req, res) => {
+  const uptimeSeconds = Math.floor((Date.now() - new Date(metrics.startTime).getTime()) / 1000);
   return res.status(200).json({
     status: 'ONLINE',
-    system: 'Radam Nox PaaS Bridge'
+    system: 'Radam Nox PaaS Bridge',
+    uptime: `${uptimeSeconds}s`,
+    metrics: {
+      totalRequests: metrics.totalRequests,
+      successfulRequests: metrics.successfulRequests,
+      failedRequests: metrics.failedRequests,
+      failoverTriggers: metrics.failoverTriggers,
+      selfHealingCount: metrics.selfHealingCount
+    },
+    recentLogs: metrics.recentLogs
   });
 });
 
-// Roteamento Inteligente com Failover de Provedores
+// Roteamento Inteligente com Failover e Métricas
 app.post('/v1/chat', checkMasterKey, async (req, res) => {
+  metrics.totalRequests++;
   const PRIMARY_GATEWAY = process.env.RADAMN_GATEWAY_URL || 'https://radamn.vercel.app/api/generate';
   const FALLBACK_GATEWAY = process.env.RADAMN_FALLBACK_URL || 'https://radamn-backup.vercel.app/api/generate';
   const MASTER_KEY = process.env.RADAMN_MASTER_KEY || 'RADAMN_MASTER_KEY_2026';
@@ -64,22 +92,32 @@ app.post('/v1/chat', checkMasterKey, async (req, res) => {
     if (!response.ok) throw new Error(`Primary status: ${response.status}`);
     
     const data = await response.json();
+    metrics.successfulRequests++;
+    logEvent('CHAT_SUCCESS', { provider: 'PRIMARY', category: promptClassification.category });
+
     return res.status(response.status).json({
       ...data,
       _radam_routing: { ...promptClassification, provider: 'PRIMARY' }
     });
   } catch (primaryError) {
-    console.warn('Falha no Provedor Principal, acionando Failover...', primaryError.message);
+    metrics.failoverTriggers++;
+    logEvent('FAILOVER_TRIGGERED', { primaryError: primaryError.message });
 
     try {
       const fallbackResponse = await fetch(FALLBACK_GATEWAY, { method: 'POST', headers, body: payload });
       const fallbackData = await fallbackResponse.json();
       
+      metrics.successfulRequests++;
+      logEvent('CHAT_SUCCESS', { provider: 'FALLBACK', category: promptClassification.category });
+
       return res.status(fallbackResponse.status).json({
         ...fallbackData,
         _radam_routing: { ...promptClassification, provider: 'FALLBACK', failoverReason: primaryError.message }
       });
     } catch (fallbackError) {
+      metrics.failedRequests++;
+      logEvent('CHAT_FAILED', { primaryError: primaryError.message, fallbackError: fallbackError.message });
+
       return res.status(502).json({
         error: 'Erro crítico na Ponte: Falha em todos os provedores da rotação.',
         primaryError: primaryError.message,
@@ -89,8 +127,10 @@ app.post('/v1/chat', checkMasterKey, async (req, res) => {
   }
 });
 
-// ENDPOINT DE SELF-HEALING E AUTO-CORREÇÃO (Fase 4 - Item 3)
+// Endpoint de Self-Healing
 app.post('/v1/heal', checkMasterKey, async (req, res) => {
+  metrics.totalRequests++;
+  metrics.selfHealingCount++;
   const GATEWAY_URL = process.env.RADAMN_GATEWAY_URL || 'https://radamn.vercel.app/api/generate';
   const MASTER_KEY = process.env.RADAMN_MASTER_KEY || 'RADAMN_MASTER_KEY_2026';
 
@@ -122,23 +162,23 @@ Por favor, corrija o código garantindo que o erro seja corrigido sem alterar a 
       },
       body: JSON.stringify({
         message: repairPrompt,
-        metadata: {
-          strategy: 'SELF_HEALING',
-          originalError: errorStack
-        }
+        metadata: { strategy: 'SELF_HEALING', originalError: errorStack }
       })
     });
 
     const data = await response.json();
+    metrics.successfulRequests++;
+    logEvent('HEAL_SUCCESS', { errorStack });
+
     return res.status(200).json({
       status: 'HEALED',
       fixedCode: data.response || data.result || data,
-      repairLogs: {
-        originalError: errorStack,
-        timestamp: new Date().toISOString()
-      }
+      repairLogs: { originalError: errorStack, timestamp: new Date().toISOString() }
     });
   } catch (error) {
+    metrics.failedRequests++;
+    logEvent('HEAL_FAILED', { error: error.message });
+
     return res.status(500).json({
       error: 'Falha no processo de Self-Healing.',
       details: error.message
