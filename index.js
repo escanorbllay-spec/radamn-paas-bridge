@@ -14,7 +14,7 @@ const checkMasterKey = (req, res, next) => {
   next();
 };
 
-// Funçao Auxiliar: Classificador Autônomo de Prompts (Fase 4 - Item 1)
+// Classificador Autônomo de Prompts
 function classifyPrompt(promptText = '') {
   const text = promptText.toLowerCase();
   if (text.includes('erro') || text.includes('fix') || text.includes('corrigir') || text.includes('bug')) {
@@ -37,48 +37,61 @@ app.get('/health', checkMasterKey, (req, res) => {
   });
 });
 
-// PONTO DE CONEXÃO DIRETA: Roteamento Inteligente no Gateway
+// PONTO DE CONEXÃO DIRETA: Roteamento Inteligente com Failover de Provedores (Fase 4 - Item 2)
 app.post('/v1/chat', checkMasterKey, async (req, res) => {
-  const GATEWAY_URL = process.env.RADAMN_GATEWAY_URL || 'https://radamn.vercel.app/api/generate';
+  const PRIMARY_GATEWAY = process.env.RADAMN_GATEWAY_URL || 'https://radamn.vercel.app/api/generate';
+  const FALLBACK_GATEWAY = process.env.RADAMN_FALLBACK_URL || 'https://radamn-backup.vercel.app/api/generate';
   const MASTER_KEY = process.env.RADAMN_MASTER_KEY || 'RADAMN_MASTER_KEY_2026';
 
+  const { prompt, message, messages } = req.body;
+  const payloadMessage = prompt || message || (messages && messages[messages.length - 1]?.content);
+  const promptClassification = classifyPrompt(payloadMessage);
+
+  const payload = JSON.stringify({
+    message: payloadMessage,
+    messages: messages || [{ role: 'user', content: payloadMessage }],
+    metadata: { classification: promptClassification }
+  });
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'x-master-key': MASTER_KEY,
+    'x-radam-intent': promptClassification.category
+  };
+
+  // Tentativa 1: Gateway Principal
   try {
-    const { prompt, message, messages } = req.body;
-    const payloadMessage = prompt || message || (messages && messages[messages.length - 1]?.content);
-
-    // Classificação Autônoma do Prompt
-    const promptClassification = classifyPrompt(payloadMessage);
-
-    const response = await fetch(GATEWAY_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-master-key': MASTER_KEY,
-        'x-radam-intent': promptClassification.category
-      },
-      body: JSON.stringify({
-        message: payloadMessage,
-        messages: messages || [{ role: 'user', content: payloadMessage }],
-        metadata: {
-          classification: promptClassification
-        }
-      })
-    });
-
+    const response = await fetch(PRIMARY_GATEWAY, { method: 'POST', headers, body: payload });
+    if (!response.ok) throw new Error(`Primary status: ${response.status}`);
+    
     const data = await response.json();
     return res.status(response.status).json({
       ...data,
-      _radam_routing: promptClassification
+      _radam_routing: { ...promptClassification, provider: 'PRIMARY' }
     });
-  } catch (error) {
-    return res.status(500).json({
-      error: 'Erro na Ponte ao conectar com o Gateway',
-      details: error.message
-    });
+  } catch (primaryError) {
+    console.warn('Falha no Provedor Principal, acionando Failover...', primaryError.message);
+
+    // Tentativa 2: Failover / Rotação Automática para Gateway Secundário
+    try {
+      const fallbackResponse = await fetch(FALLBACK_GATEWAY, { method: 'POST', headers, body: payload });
+      const fallbackData = await fallbackResponse.json();
+      
+      return res.status(fallbackResponse.status).json({
+        ...fallbackData,
+        _radam_routing: { ...promptClassification, provider: 'FALLBACK', failoverReason: primaryError.message }
+      });
+    } catch (fallbackError) {
+      return res.status(502).json({
+        error: 'Erro crítico na Ponte: Falha em todos os provedores da rotação.',
+        primaryError: primaryError.message,
+        fallbackError: fallbackError.message
+      });
+    }
   }
 });
 
-// Endpoint do Live Code Canvas (Fase 3)
+// Endpoint do Live Code Canvas
 app.get('/canvas', (req, res) => {
   const htmlCanvas = `<!DOCTYPE html>
 <html lang="pt-BR">
