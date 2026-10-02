@@ -1,4 +1,4 @@
-	mport express from 'express';
+import express from 'express';
 
 const app = express();
 app.use(express.json());
@@ -46,7 +46,7 @@ function classifyPrompt(promptText = '') {
   return { category: 'FULL_APP', priority: 'MEDIUM', strategy: 'GENERATIVE' };
 }
 
-// ENDPOINT DE TELEMETRIA E SAÚDE (Fase 5 - Item 1)
+// Endpoint de Telemetria e Saúde
 app.get('/health', checkMasterKey, (req, res) => {
   const uptimeSeconds = Math.floor((Date.now() - new Date(metrics.startTime).getTime()) / 1000);
   return res.status(200).json({
@@ -64,7 +64,80 @@ app.get('/health', checkMasterKey, (req, res) => {
   });
 });
 
-// Roteamento Inteligente com Failover e Métricas
+// PAINEL VISUAL DE OBSERVABILIDADE (Fase 5 - Item 2)
+app.get('/dashboard', (req, res) => {
+  const htmlDashboard = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RADAM NOX - Telemetry Dashboard</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0b0f19; color: #f8fafc; font-family: system-ui, sans-serif; padding: 20px; }
+    h1 { color: #38bdf8; font-size: 1.5rem; margin-bottom: 5px; }
+    .subtitle { color: #64748b; font-size: 0.85rem; margin-bottom: 20px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 25px; }
+    .card { background: #1e293b; padding: 15px; border-radius: 8px; border: 1px solid #334155; }
+    .card h3 { margin: 0 0 8px 0; font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
+    .card .val { font-size: 1.5rem; font-weight: bold; color: #38bdf8; }
+    .logs-box { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 15px; font-family: monospace; font-size: 0.8rem; height: 300px; overflow-y: auto; }
+    .log-item { margin-bottom: 8px; border-bottom: 1px solid #1e293b; padding-bottom: 5px; }
+    .tag { padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; margin-right: 6px; }
+    .tag-SUCCESS { background: #065f46; color: #34d399; }
+    .tag-FAILOVER { background: #854d0e; color: #facc15; }
+    .tag-FAILED { background: #991b1b; color: #fca5a5; }
+  </style>
+</head>
+<body>
+  <h1>RADAM NOX PaaS - Live Telemetry</h1>
+  <div class="subtitle">Monitorização em tempo real da Ponte de Conexão</div>
+
+  <div class="grid">
+    <div class="card"><h3>Total Requests</h3><div class="val" id="totalReqs">-</div></div>
+    <div class="card"><h3>Success</h3><div class="val" id="successReqs" style="color: #4ade80;">-</div></div>
+    <div class="card"><h3>Failover Triggers</h3><div class="val" id="failovers" style="color: #facc15;">-</div></div>
+    <div class="card"><h3>Self-Healing</h3><div class="val" id="healings" style="color: #c084fc;">-</div></div>
+  </div>
+
+  <h2>Logs Recentes de Operação</h2>
+  <div class="logs-box" id="logsContainer">A carregar logs...</div>
+
+  <script>
+    async function fetchTelemetry() {
+      try {
+        const res = await fetch('/health', {
+          headers: { 'x-master-key': 'RADAMN_MASTER_KEY_2026' }
+        });
+        const data = await res.json();
+        
+        document.getElementById('totalReqs').innerText = data.metrics.totalRequests;
+        document.getElementById('successReqs').innerText = data.metrics.successfulRequests;
+        document.getElementById('failovers').innerText = data.metrics.failoverTriggers;
+        document.getElementById('healings').innerText = data.metrics.selfHealingCount;
+
+        const container = document.getElementById('logsContainer');
+        container.innerHTML = data.recentLogs.map(l => \`
+          <div class="log-item">
+            <span class="tag tag-\${l.type.includes('SUCCESS') ? 'SUCCESS' : l.type.includes('FAILOVER') ? 'FAILOVER' : 'FAILED'}">\${l.type}</span>
+            <span style="color: #64748b;">[\${new Date(l.timestamp).toLocaleTimeString()}]</span>
+            <span style="color: #cbd5e1;">\${JSON.stringify(l.details)}</span>
+          </div>
+        \`).join('') || '<div style="color: #64748b;">Nenhum evento registado até ao momento.</div>';
+      } catch (err) {
+        console.error('Erro ao atualizar telemetria:', err);
+      }
+    }
+    setInterval(fetchTelemetry, 3000);
+    fetchTelemetry();
+  </script>
+</body>
+</html>`;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  return res.status(200).send(htmlDashboard);
+});
+
+// Roteamento Inteligente com Failover
 app.post('/v1/chat', checkMasterKey, async (req, res) => {
   metrics.totalRequests++;
   const PRIMARY_GATEWAY = process.env.RADAMN_GATEWAY_URL || 'https://radamn.vercel.app/api/generate';
