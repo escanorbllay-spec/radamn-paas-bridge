@@ -37,7 +37,7 @@ app.get('/health', checkMasterKey, (req, res) => {
   });
 });
 
-// PONTO DE CONEXÃO DIRETA: Roteamento Inteligente com Failover de Provedores (Fase 4 - Item 2)
+// Roteamento Inteligente com Failover de Provedores
 app.post('/v1/chat', checkMasterKey, async (req, res) => {
   const PRIMARY_GATEWAY = process.env.RADAMN_GATEWAY_URL || 'https://radamn.vercel.app/api/generate';
   const FALLBACK_GATEWAY = process.env.RADAMN_FALLBACK_URL || 'https://radamn-backup.vercel.app/api/generate';
@@ -59,7 +59,6 @@ app.post('/v1/chat', checkMasterKey, async (req, res) => {
     'x-radam-intent': promptClassification.category
   };
 
-  // Tentativa 1: Gateway Principal
   try {
     const response = await fetch(PRIMARY_GATEWAY, { method: 'POST', headers, body: payload });
     if (!response.ok) throw new Error(`Primary status: ${response.status}`);
@@ -72,7 +71,6 @@ app.post('/v1/chat', checkMasterKey, async (req, res) => {
   } catch (primaryError) {
     console.warn('Falha no Provedor Principal, acionando Failover...', primaryError.message);
 
-    // Tentativa 2: Failover / Rotação Automática para Gateway Secundário
     try {
       const fallbackResponse = await fetch(FALLBACK_GATEWAY, { method: 'POST', headers, body: payload });
       const fallbackData = await fallbackResponse.json();
@@ -88,6 +86,63 @@ app.post('/v1/chat', checkMasterKey, async (req, res) => {
         fallbackError: fallbackError.message
       });
     }
+  }
+});
+
+// ENDPOINT DE SELF-HEALING E AUTO-CORREÇÃO (Fase 4 - Item 3)
+app.post('/v1/heal', checkMasterKey, async (req, res) => {
+  const GATEWAY_URL = process.env.RADAMN_GATEWAY_URL || 'https://radamn.vercel.app/api/generate';
+  const MASTER_KEY = process.env.RADAMN_MASTER_KEY || 'RADAMN_MASTER_KEY_2026';
+
+  try {
+    const { brokenCode, errorStack, context } = req.body;
+
+    if (!brokenCode || !errorStack) {
+      return res.status(400).json({ error: 'Os parâmetros brokenCode e errorStack são obrigatórios.' });
+    }
+
+    const repairPrompt = `System: Você é o agente de Self-Healing do RADAM NOX PaaS.
+O seguinte código apresentou um erro em runtime/sintaxe.
+Erro detetado: ${errorStack}
+Contexto do Erro: ${context || 'Nenhum contexto adicional fornecido.'}
+
+Código com Erro:
+\`\`\`html
+${brokenCode}
+\`\`\`
+
+Por favor, corrija o código garantindo que o erro seja corrigido sem alterar a funcionalidade principal. Devolva apenas o código corrigido dentro de um bloco HTML.`;
+
+    const response = await fetch(GATEWAY_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-master-key': MASTER_KEY,
+        'x-radam-intent': 'BUG_FIX'
+      },
+      body: JSON.stringify({
+        message: repairPrompt,
+        metadata: {
+          strategy: 'SELF_HEALING',
+          originalError: errorStack
+        }
+      })
+    });
+
+    const data = await response.json();
+    return res.status(200).json({
+      status: 'HEALED',
+      fixedCode: data.response || data.result || data,
+      repairLogs: {
+        originalError: errorStack,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Falha no processo de Self-Healing.',
+      details: error.message
+    });
   }
 });
 
