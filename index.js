@@ -14,6 +14,21 @@ const checkMasterKey = (req, res, next) => {
   next();
 };
 
+// Funçao Auxiliar: Classificador Autônomo de Prompts (Fase 4 - Item 1)
+function classifyPrompt(promptText = '') {
+  const text = promptText.toLowerCase();
+  if (text.includes('erro') || text.includes('fix') || text.includes('corrigir') || text.includes('bug')) {
+    return { category: 'BUG_FIX', priority: 'HIGH', strategy: 'REPAIR' };
+  }
+  if (text.includes('banco') || text.includes('supabase') || text.includes('sql') || text.includes('tabela')) {
+    return { category: 'DATABASE_QUERY', priority: 'HIGH', strategy: 'STRUCTURED' };
+  }
+  if (text.includes('cor') || text.includes('botão') || text.includes('estilo') || text.includes('css')) {
+    return { category: 'UI_COMPONENT', priority: 'LOW', strategy: 'FAST' };
+  }
+  return { category: 'FULL_APP', priority: 'MEDIUM', strategy: 'GENERATIVE' };
+}
+
 // Endpoint de Saúde
 app.get('/health', checkMasterKey, (req, res) => {
   return res.status(200).json({
@@ -22,7 +37,7 @@ app.get('/health', checkMasterKey, (req, res) => {
   });
 });
 
-// PONTO DE CONEXÃO DIRETA: Roteamento para o Gateway (Radamn)
+// PONTO DE CONEXÃO DIRETA: Roteamento Inteligente no Gateway
 app.post('/v1/chat', checkMasterKey, async (req, res) => {
   const GATEWAY_URL = process.env.RADAMN_GATEWAY_URL || 'https://radamn.vercel.app/api/generate';
   const MASTER_KEY = process.env.RADAMN_MASTER_KEY || 'RADAMN_MASTER_KEY_2026';
@@ -31,20 +46,30 @@ app.post('/v1/chat', checkMasterKey, async (req, res) => {
     const { prompt, message, messages } = req.body;
     const payloadMessage = prompt || message || (messages && messages[messages.length - 1]?.content);
 
+    // Classificação Autônoma do Prompt
+    const promptClassification = classifyPrompt(payloadMessage);
+
     const response = await fetch(GATEWAY_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-master-key': MASTER_KEY
+        'x-master-key': MASTER_KEY,
+        'x-radam-intent': promptClassification.category
       },
       body: JSON.stringify({
         message: payloadMessage,
-        messages: messages || [{ role: 'user', content: payloadMessage }]
+        messages: messages || [{ role: 'user', content: payloadMessage }],
+        metadata: {
+          classification: promptClassification
+        }
       })
     });
 
     const data = await response.json();
-    return res.status(response.status).json(data);
+    return res.status(response.status).json({
+      ...data,
+      _radam_routing: promptClassification
+    });
   } catch (error) {
     return res.status(500).json({
       error: 'Erro na Ponte ao conectar com o Gateway',
@@ -53,7 +78,7 @@ app.post('/v1/chat', checkMasterKey, async (req, res) => {
   }
 });
 
-// Endpoint do Live Code Canvas (Fase 3 - Completa: Auto-Sync, Patch e Recuperação de Estado)
+// Endpoint do Live Code Canvas (Fase 3)
 app.get('/canvas', (req, res) => {
   const htmlCanvas = `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -106,7 +131,6 @@ app.get('/canvas', (req, res) => {
     const syncStatus = document.getElementById('syncStatus');
     let timeout = null;
 
-    // Recuperação Autônoma de Estado
     const savedCode = localStorage.getItem('radam_canvas_code');
     if (savedCode) { editor.value = savedCode; }
 
