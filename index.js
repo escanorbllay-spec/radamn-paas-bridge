@@ -11,13 +11,45 @@ const metrics = {
   failedRequests: 0,
   failoverTriggers: 0,
   selfHealingCount: 0,
+  activeQueueCount: 0,
   recentLogs: []
 };
+
+// Event Bus & Gerenciamento de Filas Assíncronas (Camada 0)
+const requestQueue = [];
+let isProcessingQueue = false;
 
 function logEvent(type, details) {
   const entry = { timestamp: new Date().toISOString(), type, details };
   metrics.recentLogs.unshift(entry);
   if (metrics.recentLogs.length > 20) metrics.recentLogs.pop();
+}
+
+// Middleware de Processamento Assíncrono de Fila
+const enqueueRequest = (task) => {
+  return new Promise((resolve, reject) => {
+    requestQueue.push({ task, resolve, reject });
+    metrics.activeQueueCount = requestQueue.length;
+    processQueue();
+  });
+};
+
+async function processQueue() {
+  if (isProcessingQueue || requestQueue.length === 0) return;
+  isProcessingQueue = true;
+
+  const { task, resolve, reject } = requestQueue.shift();
+  metrics.activeQueueCount = requestQueue.length;
+
+  try {
+    const result = await task();
+    resolve(result);
+  } catch (err) {
+    reject(err);
+  } finally {
+    isProcessingQueue = false;
+    processQueue();
+  }
 }
 
 // Validação da Master Key na Ponte
@@ -58,13 +90,14 @@ app.get('/health', checkMasterKey, (req, res) => {
       successfulRequests: metrics.successfulRequests,
       failedRequests: metrics.failedRequests,
       failoverTriggers: metrics.failoverTriggers,
-      selfHealingCount: metrics.selfHealingCount
+      selfHealingCount: metrics.selfHealingCount,
+      activeQueueCount: metrics.activeQueueCount
     },
     recentLogs: metrics.recentLogs
   });
 });
 
-// PAINEL VISUAL DE OBSERVABILIDADE (Fase 5 - Item 2)
+// Painel Visual de Observabilidade
 app.get('/dashboard', (req, res) => {
   const htmlDashboard = `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -98,6 +131,7 @@ app.get('/dashboard', (req, res) => {
     <div class="card"><h3>Success</h3><div class="val" id="successReqs" style="color: #4ade80;">-</div></div>
     <div class="card"><h3>Failover Triggers</h3><div class="val" id="failovers" style="color: #facc15;">-</div></div>
     <div class="card"><h3>Self-Healing</h3><div class="val" id="healings" style="color: #c084fc;">-</div></div>
+    <div class="card"><h3>Fila Ativa</h3><div class="val" id="queueCount" style="color: #38bdf8;">-</div></div>
   </div>
 
   <h2>Logs Recentes de Operação</h2>
@@ -115,6 +149,7 @@ app.get('/dashboard', (req, res) => {
         document.getElementById('successReqs').innerText = data.metrics.successfulRequests;
         document.getElementById('failovers').innerText = data.metrics.failoverTriggers;
         document.getElementById('healings').innerText = data.metrics.selfHealingCount;
+        document.getElementById('queueCount').innerText = data.metrics.activeQueueCount || 0;
 
         const container = document.getElementById('logsContainer');
         container.innerHTML = data.recentLogs.map(l => \`
@@ -137,67 +172,122 @@ app.get('/dashboard', (req, res) => {
   return res.status(200).send(htmlDashboard);
 });
 
-// Roteamento Inteligente com Failover
+// Roteamento Inteligente com Failover & Streaming SSE (Camada 0)
 app.post('/v1/chat', checkMasterKey, async (req, res) => {
   metrics.totalRequests++;
-  const PRIMARY_GATEWAY = process.env.RADAMN_GATEWAY_URL || 'https://radamn.vercel.app/api/generate';
-  const FALLBACK_GATEWAY = process.env.RADAMN_FALLBACK_URL || 'https://radamn-backup.vercel.app/api/generate';
-  const MASTER_KEY = process.env.RADAMN_MASTER_KEY || 'RADAMN_MASTER_KEY_2026';
 
-  const { prompt, message, messages } = req.body;
-  const payloadMessage = prompt || message || (messages && messages[messages.length - 1]?.content);
-  const promptClassification = classifyPrompt(payloadMessage);
+  return enqueueRequest(async () => {
+    const PRIMARY_GATEWAY = process.env.RADAMN_GATEWAY_URL || 'https://radamn.vercel.app/api/generate';
+    const FALLBACK_GATEWAY = process.env.RADAMN_FALLBACK_URL || 'https://radamn-backup.vercel.app/api/generate';
+    const RENDER_CHAT_URL = process.env.RADAMN_RENDER_URL || 'https://radamn.onrender.com/api/chat';
+    const MASTER_KEY = process.env.RADAMN_MASTER_KEY || 'RADAMN_MASTER_KEY_2026';
 
-  const payload = JSON.stringify({
-    message: payloadMessage,
-    messages: messages || [{ role: 'user', content: payloadMessage }],
-    metadata: { classification: promptClassification }
-  });
+    const { prompt, message, messages, stream } = req.body;
+    const payloadMessage = prompt || message || (messages && messages[messages.length - 1]?.content);
+    const promptClassification = classifyPrompt(payloadMessage);
 
-  const headers = {
-    'Content-Type': 'application/json',
-    'x-master-key': MASTER_KEY,
-    'x-radam-intent': promptClassification.category
-  };
-
-  try {
-    const response = await fetch(PRIMARY_GATEWAY, { method: 'POST', headers, body: payload });
-    if (!response.ok) throw new Error(`Primary status: ${response.status}`);
-    
-    const data = await response.json();
-    metrics.successfulRequests++;
-    logEvent('CHAT_SUCCESS', { provider: 'PRIMARY', category: promptClassification.category });
-
-    return res.status(response.status).json({
-      ...data,
-      _radam_routing: { ...promptClassification, provider: 'PRIMARY' }
+    const payload = JSON.stringify({
+      message: payloadMessage,
+      messages: messages || [{ role: 'user', content: payloadMessage }],
+      stream: !!stream,
+      metadata: { classification: promptClassification }
     });
-  } catch (primaryError) {
-    metrics.failoverTriggers++;
-    logEvent('FAILOVER_TRIGGERED', { primaryError: primaryError.message });
 
-    try {
-      const fallbackResponse = await fetch(FALLBACK_GATEWAY, { method: 'POST', headers, body: payload });
-      const fallbackData = await fallbackResponse.json();
-      
-      metrics.successfulRequests++;
-      logEvent('CHAT_SUCCESS', { provider: 'FALLBACK', category: promptClassification.category });
+    const headers = {
+      'Content-Type': 'application/json',
+      'x-master-key': MASTER_KEY,
+      'x-radam-intent': promptClassification.category
+    };
 
-      return res.status(fallbackResponse.status).json({
-        ...fallbackData,
-        _radam_routing: { ...promptClassification, provider: 'FALLBACK', failoverReason: primaryError.message }
-      });
-    } catch (fallbackError) {
-      metrics.failedRequests++;
-      logEvent('CHAT_FAILED', { primaryError: primaryError.message, fallbackError: fallbackError.message });
+    // SUPORTE A STREAMING DIRETO VIA SSE
+    if (stream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
 
-      return res.status(502).json({
-        error: 'Erro crítico na Ponte: Falha em todos os provedores da rotação.',
-        primaryError: primaryError.message,
-        fallbackError: fallbackError.message
-      });
+      try {
+        const response = await fetch(PRIMARY_GATEWAY, { method: 'POST', headers, body: payload });
+        if (!response.ok) throw new Error(`Primary status: ${response.status}`);
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(decoder.decode(value, { stream: true }));
+        }
+
+        metrics.successfulRequests++;
+        logEvent('STREAM_SUCCESS', { provider: 'PRIMARY', category: promptClassification.category });
+        return res.end();
+      } catch (streamError) {
+        metrics.failoverTriggers++;
+        logEvent('STREAM_FAILOVER', { primaryError: streamError.message });
+
+        try {
+          const fallbackRes = await fetch(FALLBACK_GATEWAY, { method: 'POST', headers, body: payload });
+          const reader = fallbackRes.body.getReader();
+          const decoder = new TextDecoder();
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            res.write(decoder.decode(value, { stream: true }));
+          }
+
+          metrics.successfulRequests++;
+          logEvent('STREAM_SUCCESS', { provider: 'FALLBACK', category: promptClassification.category });
+          return res.end();
+        } catch (fallbackStreamErr) {
+          metrics.failedRequests++;
+          logEvent('STREAM_FAILED', { error: fallbackStreamErr.message });
+          res.write(`data: ${JSON.stringify({ error: 'Erro crítico no streaming do gateway.' })}\n\n`);
+          return res.end();
+        }
+      }
     }
-  }
+
+    // REQUISIÇÃO PADRÃO (SEM STREAM)
+    try {
+      const response = await fetch(PRIMARY_GATEWAY, { method: 'POST', headers, body: payload });
+      if (!response.ok) throw new Error(`Primary status: ${response.status}`);
+
+      const data = await response.json();
+      metrics.successfulRequests++;
+      logEvent('CHAT_SUCCESS', { provider: 'PRIMARY', category: promptClassification.category });
+
+      return res.status(response.status).json({
+        ...data,
+        _radam_routing: { ...promptClassification, provider: 'PRIMARY' }
+      });
+    } catch (primaryError) {
+      metrics.failoverTriggers++;
+      logEvent('FAILOVER_TRIGGERED', { primaryError: primaryError.message });
+
+      try {
+        const fallbackResponse = await fetch(FALLBACK_GATEWAY, { method: 'POST', headers, body: payload });
+        const fallbackData = await fallbackResponse.json();
+
+        metrics.successfulRequests++;
+        logEvent('CHAT_SUCCESS', { provider: 'FALLBACK', category: promptClassification.category });
+
+        return res.status(fallbackResponse.status).json({
+          ...fallbackData,
+          _radam_routing: { ...promptClassification, provider: 'FALLBACK', failoverReason: primaryError.message }
+        });
+      } catch (fallbackError) {
+        metrics.failedRequests++;
+        logEvent('CHAT_FAILED', { primaryError: primaryError.message, fallbackError: fallbackError.message });
+
+        return res.status(502).json({
+          error: 'Erro crítico na Ponte: Falha em todos os provedores da rotação.',
+          primaryError: primaryError.message,
+          fallbackError: fallbackError.message
+        });
+      }
+    }
+  });
 });
 
 // Endpoint de Self-Healing
