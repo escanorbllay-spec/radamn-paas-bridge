@@ -3,7 +3,7 @@ import express from 'express';
 const app = express();
 app.use(express.json());
 
-// CONFIGURAÇÃO DE CORS PARA A INTERFACE SPA
+// CONFIGURAÇÃO DE CORS PARA A INTERFACE SPA E GERADOR DE ARTEFATOS
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
@@ -23,13 +23,15 @@ const metrics = {
   failoverTriggers: 0,
   selfHealingCount: 0,
   activeQueueCount: 0,
+  deployTriggers: 0,
   recentLogs: []
 };
 
-// Armazenamento em Memória para Snapshots / Projetos (Simulação/Bridge Supabase)
+// Armazenamento em Memória para Snapshots / Projetos e Artefatos Renderizados
 const projectStore = new Map();
+const renderStore = new Map();
 
-// Event Bus & Gerenciamento de Filas Assíncronas (Camada 0)
+// Event Bus & Gerenciamento de Filas Assíncronas
 const requestQueue = [];
 let isProcessingQueue = false;
 
@@ -105,20 +107,20 @@ app.get('/health', checkMasterKey, (req, res) => {
       failedRequests: metrics.failedRequests,
       failoverTriggers: metrics.failoverTriggers,
       selfHealingCount: metrics.selfHealingCount,
-      activeQueueCount: metrics.activeQueueCount
+      activeQueueCount: metrics.activeQueueCount,
+      deployTriggers: metrics.deployTriggers
     },
     recentLogs: metrics.recentLogs
   });
 });
 
-// FASE 1: Gestão Autônoma de Projetos & Snapshots (Radam Nox Interface SPA)
+// FASE 1: Gestão Autônoma de Projetos & Snapshots
 app.post('/v1/projects', checkMasterKey, (req, res) => {
   const { projectId, projectName, newCode, snapshot } = req.body;
   const id = projectId || `proj_${Date.now()}`;
 
   const existingProject = projectStore.get(id);
 
-  // Diff-Check Inteligente
   if (existingProject && existingProject.code === newCode) {
     return res.status(200).json({
       projectId: id,
@@ -150,13 +152,54 @@ app.post('/v1/projects', checkMasterKey, (req, res) => {
   });
 });
 
-// FASE 1: Snapshot Remoto de Estado (Resgate de Checkpoints)
 app.get('/v1/projects/:id', checkMasterKey, (req, res) => {
   const project = projectStore.get(req.params.id);
   if (!project) {
     return res.status(404).json({ error: 'Projeto não encontrado.' });
   }
   return res.status(200).json(project);
+});
+
+// FASE 2: Engine de Deploy Automático & Artefatos (Radam Artifacts & Code Generator)
+app.post('/v1/deploy', checkMasterKey, (req, res) => {
+  const { projectId, event, code, projectName } = req.body;
+
+  // Trigger de Deploy por Evento (generation.complete)
+  if (event && event !== 'generation.complete') {
+    return res.status(400).json({ error: 'Deploy rejeitado: O evento deve ser generation.complete' });
+  }
+
+  const id = projectId || `proj_${Date.now()}`;
+  renderStore.set(id, {
+    code,
+    projectName: projectName || 'App Renderizado',
+    deployedAt: new Date().toISOString()
+  });
+
+  metrics.deployTriggers++;
+  logEvent('DEPLOY_SUCCESS', { projectId: id, event: event || 'manual' });
+
+  // Invalidação de Cache na Borda (CDN)
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  return res.status(200).json({
+    status: 'DEPLOYED',
+    projectId: id,
+    renderUrl: `/api/render/${id}`,
+    deployedAt: new Date().toISOString()
+  });
+});
+
+// Geração Autônoma de Render/Subdomínio
+app.get('/api/render/:id', (req, res) => {
+  const artifact = renderStore.get(req.params.id);
+  if (!artifact) {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.status(404).send('<h1>404 - Artefato ou Renderização não encontrada.</h1>');
+  }
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
+  return res.status(200).send(artifact.code);
 });
 
 // Painel Visual de Observabilidade
@@ -191,9 +234,9 @@ app.get('/dashboard', (req, res) => {
   <div class="grid">
     <div class="card"><h3>Total Requests</h3><div class="val" id="totalReqs">-</div></div>
     <div class="card"><h3>Success</h3><div class="val" id="successReqs" style="color: #4ade80;">-</div></div>
+    <div class="card"><h3>Deploys Efetuados</h3><div class="val" id="deploys" style="color: #38bdf8;">-</div></div>
     <div class="card"><h3>Failover Triggers</h3><div class="val" id="failovers" style="color: #facc15;">-</div></div>
     <div class="card"><h3>Self-Healing</h3><div class="val" id="healings" style="color: #c084fc;">-</div></div>
-    <div class="card"><h3>Fila Ativa</h3><div class="val" id="queueCount" style="color: #38bdf8;">-</div></div>
   </div>
 
   <h2>Logs Recentes de Operação</h2>
@@ -209,14 +252,14 @@ app.get('/dashboard', (req, res) => {
         
         document.getElementById('totalReqs').innerText = data.metrics.totalRequests;
         document.getElementById('successReqs').innerText = data.metrics.successfulRequests;
+        document.getElementById('deploys').innerText = data.metrics.deployTriggers || 0;
         document.getElementById('failovers').innerText = data.metrics.failoverTriggers;
         document.getElementById('healings').innerText = data.metrics.selfHealingCount;
-        document.getElementById('queueCount').innerText = data.metrics.activeQueueCount || 0;
 
         const container = document.getElementById('logsContainer');
         container.innerHTML = data.recentLogs.map(l => \`
           <div class="log-item">
-            <span class="tag tag-\${l.type.includes('SUCCESS') || l.type.includes('SAVE') ? 'SUCCESS' : l.type.includes('FAILOVER') ? 'FAILOVER' : 'FAILED'}">\${l.type}</span>
+            <span class="tag tag-\${l.type.includes('SUCCESS') || l.type.includes('SAVE') || l.type.includes('DEPLOY') ? 'SUCCESS' : l.type.includes('FAILOVER') ? 'FAILOVER' : 'FAILED'}">\${l.type}</span>
             <span style="color: #64748b;">[\${new Date(l.timestamp).toLocaleTimeString()}]</span>
             <span style="color: #cbd5e1;">\${JSON.stringify(l.details)}</span>
           </div>
@@ -470,43 +513,4 @@ app.get('/canvas', (req, res) => {
       syncStatus.innerText = '● Sincronizado (Local)';
       syncStatus.style.color = '#4ade80';
 
-      const doc = preview.contentDocument || preview.contentWindow.document;
-      doc.open();
-      doc.write(code + \`<script>
-        window.addEventListener('message', (event) => {
-          if (event.data && event.data.type === 'patch') {
-            const el = document.querySelector(event.data.target);
-            if (el) { el.innerHTML = event.data.content; }
-          }
-        });
-      </\script>\`);
-      doc.close();
-    }
-
-    window.applyPatch = function(targetSelector, newContent) {
-      if (preview.contentWindow) {
-        preview.contentWindow.postMessage({
-          type: 'patch',
-          target: targetSelector,
-          content: newContent
-        }, '*');
-      }
-    };
-
-    editor.addEventListener('input', () => {
-      syncStatus.innerText = '○ Salvando...';
-      syncStatus.style.color = '#facc15';
-      clearTimeout(timeout);
-      timeout = setTimeout(updateFullPreview, 250);
-    });
-
-    window.onload = updateFullPreview;
-  </script>
-</body>
-</html>`;
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  return res.status(200).send(htmlCanvas);
-});
-
-export default app;
-
+      const doc = preview.contentDocument || preview.contentWindow.documen
